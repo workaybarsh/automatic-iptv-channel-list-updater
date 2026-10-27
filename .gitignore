@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# User-specific files
+backups/
+reports/
+playlist.txt
+
+# Prevent accidental commits of playlists
+*.m3u
+*.m3u8
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

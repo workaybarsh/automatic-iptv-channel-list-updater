@@ -1,0 +1,23 @@
+AUTOMATIC IPTV CHANNEL LIST UPDATER
+===================================
+
+1) Put your own M3U file in this folder.
+   The filename must contain "update". Example:
+       update-channels.m3u
+
+2) Double-click UPDATE-PLAYLIST.bat.
+   On the first run, the required Python package is installed automatically.
+
+3) When it finishes:
+   - the playlist is updated in place,
+   - the old version is saved under backups/,
+   - a CSV report is written under reports/.
+
+IMPORTANT:
+- Playlists that do not contain "update" in their filename are never touched.
+- If several "update" files exist, the tool asks once which one to use.
+- Python 3.9+ is required: https://www.python.org/downloads/
+- Close your IPTV player before running if the playlist is open there.
+
+Full documentation: README.md
+Legal notice: DISCLAIMER.md
