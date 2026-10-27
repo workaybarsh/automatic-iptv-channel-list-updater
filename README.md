@@ -14,6 +14,11 @@ Download the latest zip from the
 page. Extract it, put your playlist next to the tool as `update-channels.m3u`,
 and double-click `UPDATE-PLAYLIST.bat`.
 
+## Screenshots
+
+<img src="docs/terminal-en.png" alt="Example run" width="900">
+<img src="docs/report-en.png" alt="Update report" width="900">
+
 ## What it does
 
 1. Finds the playlist in its own folder whose filename contains `update`.
