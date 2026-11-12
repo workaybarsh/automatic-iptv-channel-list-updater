@@ -87,7 +87,7 @@ PLAYLIST_CONFIG = BASE_DIR / "playlist.txt"
 PLAYLIST_KEYWORD = "update"
 STREAMS_API = "https://iptv-org.github.io/api/streams.json"
 CHANNELS_API = "https://iptv-org.github.io/api/channels.json"
-TR_PLAYLIST = "https://iptv-org.github.io/iptv/countries/tr.m3u"
+BLOCKLIST_API = "https://iptv-org.github.io/api/blocklist.json"
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -151,6 +151,8 @@ class SourceData:
     by_channel: Dict[str, List[dict]] = field(default_factory=lambda: defaultdict(list))
     # (country code, normalized name) -> channel ID
     by_name: Dict[Tuple[str, str], str] = field(default_factory=dict)
+    # channel ID -> reason ("dmca" / "nsfw")
+    blocked: Dict[str, str] = field(default_factory=dict)
     stream_count: int = 0
     channel_count: int = 0
 
@@ -197,6 +199,22 @@ def is_probably_hls(url: str) -> bool:
     if "youtube.com" in u or "youtu.be" in u or "twitch.tv" in u:
         return False
     return True
+
+
+# Red flags for candidate URLs that usually belong to third-party panels,
+# leaked CDN tokens or proxy services instead of an official broadcaster.
+SUSPICIOUS_PATTERNS = (
+    ("raw-ip", re.compile(r"^https?://\d{1,3}(?:\.\d{1,3}){3}(?::|/)")),
+    ("xtream-panel", re.compile(r"^https?://[^/]+:\d{2,5}/[^/]+/[^/]+/\d+")),
+    ("panel-path", re.compile(r":\d{2,5}/play/")),
+    ("shared-token", re.compile(r"[?&]token=")),
+    ("proxy-domain", re.compile(r"workers\.dev|\.lol/|\.xyz/|\.top/|\.click/|\.shop/")),
+)
+
+
+def suspicious_reasons(url: str) -> List[str]:
+    """Return the red flags for a candidate URL (empty list = looks clean)."""
+    return [name for name, pattern in SUSPICIOUS_PATTERNS if pattern.search(url or "")]
 
 
 def host_of(url: str) -> str:
@@ -538,6 +556,7 @@ def load_source(offline: bool) -> SourceData:
     print("Loading source data (iptv-org)...")
     streams = download_json(STREAMS_API, "streams.json", 6, offline)
     channels = download_json(CHANNELS_API, "channels.json", 24 * 30, offline)
+    blocklist = download_json(BLOCKLIST_API, "blocklist.json", 24, offline)
 
     src = SourceData(stream_count=len(streams), channel_count=len(channels))
     for s in streams:
@@ -546,9 +565,20 @@ def load_source(offline: bool) -> SourceData:
             src.by_channel[ch].append(s)
             src.by_channel[ch.lower()].append(s)
 
+    # Hard rule: never offer a channel the source has removed (DMCA / NSFW).
+    blocked_ids = set()
+    for entry in blocklist:
+        cid = entry.get("channel")
+        if cid:
+            reason = entry.get("reason") or "blocked"
+            blocked_ids.add(cid)
+            src.blocked[cid] = reason
+            src.blocked[cid.lower()] = reason
+
     src.by_name = build_name_index(channels)
 
     print(f"  Source: {src.stream_count} streams, {src.channel_count} channels")
+    print(f"  Blocked: {len(blocked_ids)} channels (skipped, never re-added)")
     return src
 
 
@@ -622,6 +652,8 @@ def gather_candidates(ch: Channel, src: SourceData, args: argparse.Namespace) ->
     - quality variants in the same directory (e.g. 1080p -> 720p)
     """
     keys = resolve_keys(ch, src, getattr(args, "name_match", False))
+    # Hard rule: never use a channel the source has removed (DMCA / NSFW).
+    keys = [k for k in keys if k not in src.blocked and k.lower() not in src.blocked]
     orig_feed = ch.tvg_id.split("@", 1)[1] if "@" in ch.tvg_id else ""
     seen = set()
     pool: List[dict] = []
@@ -631,6 +663,9 @@ def gather_candidates(ch: Channel, src: SourceData, args: argparse.Namespace) ->
             origin: str = "source", geo: int = 0, feed: str = "") -> None:
         url = (url or "").strip()
         if not url or not is_probably_hls(url):
+            return
+        flags = suspicious_reasons(url)
+        if flags and getattr(args, "no_panel", False):
             return
         key = (url, referrer, user_agent)
         if key in seen:
@@ -648,6 +683,7 @@ def gather_candidates(ch: Channel, src: SourceData, args: argparse.Namespace) ->
             "referrer": referrer,
             "user_agent": user_agent,
             "origin": origin,
+            "suspicious": flags,
         })
 
     # 1) iptv-org kaynagi
@@ -671,7 +707,8 @@ def gather_candidates(ch: Channel, src: SourceData, args: argparse.Namespace) ->
     # Same feed first; then non-geo-blocked, higher quality and trusted source.
     def sort_key(x: dict) -> tuple:
         feed_pen = 0 if (not orig_feed or x["feed"] == orig_feed) else 1
-        return (x["geo"], feed_pen, -x["quality"], -x["trust"])
+        suspicious_pen = 1 if x["suspicious"] else 0
+        return (x["geo"], suspicious_pen, feed_pen, -x["quality"], -x["trust"])
 
     pool.sort(key=sort_key)
     return pool[: max(1, args.max_candidates)]
@@ -683,6 +720,14 @@ def gather_candidates(ch: Channel, src: SourceData, args: argparse.Namespace) ->
 
 
 def process_channel(ch: Channel, src: SourceData, prober: Prober, args: argparse.Namespace) -> Change:
+    base_id = ch.tvg_id.split("@", 1)[0].strip()
+    blocked_reason = src.blocked.get(base_id) or src.blocked.get(base_id.lower())
+    if blocked_reason:
+        return Change(
+            ch, "SKIPPED",
+            note=f"blocked in source ({blocked_reason}); left untouched",
+        )
+
     h: Dict[str, str] = {}
     if ch.referrer:
         h["Referer"] = ch.referrer
@@ -723,7 +768,8 @@ def process_channel(ch: Channel, src: SourceData, prober: Prober, args: argparse
                     ch, "REPLACE", new_url=new_url,
                     new_referrer=cand.get("referrer"),
                     new_user_agent=cand.get("user_agent"),
-                    note=f"changed in source ({cand.get('origin', 'source')})",
+                    note=f"changed in source ({cand.get('origin', 'source')})"
+                         + (f" [WARN: suspicious URL: {', '.join(cand['suspicious'])}]" if cand.get("suspicious") else ""),
                     old_note=first.note,
                 )
         return Change(ch, "OK", note=first.note)
@@ -755,7 +801,8 @@ def process_channel(ch: Channel, src: SourceData, prober: Prober, args: argparse
                 ch, "REPLACE", new_url=new_url,
                 new_referrer=cand.get("referrer"),
                 new_user_agent=cand.get("user_agent"),
-                note=f"{first.note} -> new link works ({cand.get('origin', 'source')})",
+                note=f"{first.note} -> new link works ({cand.get('origin', 'source')})"
+                     + (f" [WARN: suspicious URL: {', '.join(cand['suspicious'])}]" if cand.get("suspicious") else ""),
                 old_note=first.note,
             )
         errors.append(f"{host_of(new_url)}: {r.note}")
@@ -992,6 +1039,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="Maximum candidate links per channel")
     p.add_argument("--name-match", action="store_true",
                    help="If tvg-id is missing, try an exact name match in the same country (default: off)")
+    p.add_argument("--no-panel", action="store_true",
+                   help="Skip candidate URLs that look like raw IP / panel / shared-token / proxy links")
     p.add_argument("--offline", action="store_true", help="Use the cache instead of downloading source data")
     p.add_argument("--insecure", action="store_true", help="Skip certificate verification on SSL errors")
     p.add_argument("--no-header", action="store_true", help="Do not change the #Updated timestamp")
@@ -1081,9 +1130,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "REPLACE": "REPLACED",
                     "DEAD": "DEAD",
                     "REMOVE": "REMOVE",
+                    "SKIPPED": "SKIPPED",
                 }.get(change.action, change.action)
                 print(f"[{done:>3}/{total}] {tag:<8} {ch.name}")
-                if change.action in ("REPLACE", "DEAD", "REMOVE"):
+                if change.action in ("REPLACE", "DEAD", "REMOVE", "SKIPPED"):
                     print(f"        old : {ch.url[:110]}")
                     if change.new_url:
                         print(f"        new : {change.new_url[:110]}")
@@ -1106,6 +1156,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     unstable = sum(1 for c in changes if c.action == "UNSTABLE")
     repl = sum(1 for c in changes if c.action == "REPLACE")
     dead = sum(1 for c in changes if c.action in ("DEAD", "REMOVE"))
+    skipped = sum(1 for c in changes if c.action == "SKIPPED")
     print("\n" + "=" * 68)
     print(f"Scanned        : {len(changes)}")
     print(f"Working        : {ok}")
@@ -1113,6 +1164,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Unstable       : {unstable} (link kept)")
     print(f"Updated links  : {repl}")
     print(f"Not working    : {dead}")
+    if skipped:
+        print(f"Skipped (blocked): {skipped}")
     print("=" * 68)
 
     if repl:
@@ -1127,6 +1180,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("\nNot working / no alternative found:")
         for c in changes:
             if c.action in ("DEAD", "REMOVE"):
+                print(f"  - {c.channel.name} ({c.channel.tvg_id}) -> {c.note[:140]}")
+
+    if skipped:
+        print("\nSkipped (blocked in source, never re-added):")
+        for c in changes:
+            if c.action == "SKIPPED":
                 print(f"  - {c.channel.name} ({c.channel.tvg_id}) -> {c.note[:140]}")
 
     # Rapor

@@ -1,8 +1,9 @@
 # Automatic IPTV Channel List Updater
 
-A small tool that repairs Turkish IPTV/M3U playlists **without changing channel
-order or metadata**. Dead stream URLs are replaced with working ones from the
-[iptv-org](https://github.com/iptv-org/iptv) database.
+A small tool that repairs IPTV/M3U playlists **without changing channel order or
+metadata**. Dead stream URLs are replaced with working ones from the
+[iptv-org](https://github.com/iptv-org/iptv) database. It works with playlists
+from any country, not only Turkish ones.
 
 > This repository contains **only the tool**. There is no bundled playlist or
 > stream URL. The user supplies their own M3U file.
@@ -27,6 +28,10 @@ and double-click `UPDATE-PLAYLIST.bat`.
 4. Replaces only the **URL line**; `#EXTINF`, channel name, logo, group,
    `tvg-id` and channel order stay exactly the same.
 5. Writes a timestamped backup to `backups/` and a CSV report to `reports/`.
+6. Never uses a channel that the source removed for copyright (DMCA) or NSFW
+   reasons; such channels are reported as skipped and left untouched.
+7. Flags candidate URLs that look like raw IP addresses, IPTV panels, shared
+   tokens or proxy services. Use `--no-panel` to skip them entirely.
 
 By default it never deletes a channel. If no alternative is found, the channel
 is left untouched and reported. Use `--remove-dead` to remove such channels.
@@ -69,7 +74,7 @@ python playlist_updater.py
 
 - `https://iptv-org.github.io/api/streams.json`
 - `https://iptv-org.github.io/api/channels.json`
-- `https://iptv-org.github.io/iptv/countries/tr.m3u`
+- `https://iptv-org.github.io/api/blocklist.json`
 
 Source data is cached under `%LOCALAPPDATA%\iptv-playlist-updater\cache`.
 
@@ -89,6 +94,7 @@ Source data is cached under `%LOCALAPPDATA%\iptv-playlist-updater\cache`.
 | `--siblings` / `--no-siblings` | Try quality variants (default: on) |
 | `--max-candidates N` | Maximum candidate links per channel (default 10) |
 | `--name-match` | Try exact name matching inside the same country (default: off) |
+| `--no-panel` | Skip candidate URLs that look like raw IP / panel / shared-token / proxy links |
 | `--refresh-different` | Also update working channels whose source URL changed |
 | `--remove-dead` | Remove channels with no working alternative |
 | `--offline` | Use the last cache instead of downloading source data |
